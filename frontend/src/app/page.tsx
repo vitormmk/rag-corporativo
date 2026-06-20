@@ -1,25 +1,195 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type Assistente = "ti" | "rh" | "processos";
+
+type Usuario = {
+  username: string;
+  nome: string;
+  grupos: string[];
+  permissoes: string[];
+};
 
 type RespostaAPI = {
   resposta: string;
   fontes: string[];
   confianca: "alta" | "baixa" | "sem_resposta";
   assistente_id: string;
+  permissoes_aplicadas: string[];
 };
 
 const ASSISTENTES: { id: Assistente; nome: string; descricao: string }[] = [
-  { id: "ti", nome: "TI", descricao: "Infraestrutura, redes, VPN, sistemas" },
-  { id: "rh", nome: "RH", descricao: "Políticas, benefícios, processos internos" },
-  { id: "processos", nome: "Processos", descricao: "Procedimentos gerais da empresa" },
+  { id: "ti", nome: "TI", descricao: "Infraestrutura, redes, sistemas" },
+  { id: "rh", nome: "RH", descricao: "Políticas, benefícios, processos" },
+  { id: "processos", nome: "Processos", descricao: "Procedimentos gerais" },
 ];
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const STORAGE_KEY = "rag.usuario";
 
 export default function Home() {
+  const [usuario, setUsuario] = useState<Usuario | null>(null);
+  const [carregando, setCarregando] = useState(true);
+
+  // Restaura sessão do localStorage no carregamento
+  useEffect(() => {
+    const salvo = localStorage.getItem(STORAGE_KEY);
+    if (salvo) {
+      try {
+        setUsuario(JSON.parse(salvo));
+      } catch {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    }
+    setCarregando(false);
+  }, []);
+
+  function aoLogar(u: Usuario) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(u));
+    setUsuario(u);
+  }
+
+  function aoSair() {
+    localStorage.removeItem(STORAGE_KEY);
+    setUsuario(null);
+  }
+
+  if (carregando) {
+    return (
+      <main className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex items-center justify-center">
+        <p className="text-zinc-500 text-sm">Carregando...</p>
+      </main>
+    );
+  }
+
+  if (!usuario) {
+    return <TelaLogin aoLogar={aoLogar} />;
+  }
+
+  return <TelaChat usuario={usuario} aoSair={aoSair} />;
+}
+
+// ============================================================
+// Tela de Login
+// ============================================================
+
+function TelaLogin({ aoLogar }: { aoLogar: (u: Usuario) => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
+
+  async function enviar() {
+    if (!username.trim() || !password.trim()) return;
+
+    setLoading(true);
+    setErro(null);
+
+    try {
+      const res = await fetch(`${API_URL}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `Erro ${res.status}`);
+      }
+
+      const data: Usuario = await res.json();
+      aoLogar(data);
+    } catch (e) {
+      setErro(e instanceof Error ? e.message : "Erro ao fazer login");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      enviar();
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex items-center justify-center p-8">
+      <div className="w-full max-w-sm">
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+          RAG Corporativo
+        </h1>
+        <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-6">
+          Entre com seu usuário
+        </p>
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              Usuário
+            </label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={handleKeyDown}
+              autoComplete="username"
+              className="w-full p-2 rounded border border-zinc-300 bg-white text-zinc-900 focus:outline-none focus:border-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-zinc-100"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              Senha
+            </label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={handleKeyDown}
+              autoComplete="current-password"
+              className="w-full p-2 rounded border border-zinc-300 bg-white text-zinc-900 focus:outline-none focus:border-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-zinc-100"
+            />
+          </div>
+
+          <button
+            onClick={enviar}
+            disabled={loading || !username.trim() || !password.trim()}
+            className="w-full px-4 py-2 rounded bg-zinc-900 text-zinc-50 text-sm font-medium hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          >
+            {loading ? "Entrando..." : "Entrar"}
+          </button>
+
+          {erro && (
+            <div className="text-sm text-red-700 dark:text-red-400">{erro}</div>
+          )}
+        </div>
+
+        <div className="mt-8 pt-6 border-t border-zinc-200 dark:border-zinc-800 text-xs text-zinc-500 dark:text-zinc-400">
+          <p className="mb-1 font-medium">Usuários de teste:</p>
+          <ul className="space-y-0.5">
+            <li>alice / senha123 — funcionária comum</li>
+            <li>bob / senha123 — TI</li>
+            <li>carol / senha123 — RH</li>
+          </ul>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// ============================================================
+// Tela de Chat
+// ============================================================
+
+function TelaChat({
+  usuario,
+  aoSair,
+}: {
+  usuario: Usuario;
+  aoSair: () => void;
+}) {
   const [assistente, setAssistente] = useState<Assistente>("ti");
   const [pergunta, setPergunta] = useState("");
   const [resposta, setResposta] = useState<RespostaAPI | null>(null);
@@ -36,12 +206,20 @@ export default function Home() {
     try {
       const res = await fetch(`${API_URL}/query`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Username": usuario.username,
+        },
         body: JSON.stringify({
           pergunta: pergunta.trim(),
           assistente_id: assistente,
         }),
       });
+
+      if (res.status === 401) {
+        aoSair();
+        return;
+      }
 
       if (!res.ok) {
         throw new Error(`Erro ${res.status}: ${res.statusText}`);
@@ -66,13 +244,24 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-zinc-50 dark:bg-zinc-950 p-8">
       <div className="max-w-3xl mx-auto">
-        <header className="mb-8">
-          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-            RAG Corporativo
-          </h1>
-          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-            Selecione um assistente e faça sua pergunta.
-          </p>
+        <header className="mb-6 flex items-start justify-between">
+          <div>
+            <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
+              RAG Corporativo
+            </h1>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+              {usuario.nome}
+            </p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-500 mt-1">
+              Acesso: {usuario.permissoes.join(", ")}
+            </p>
+          </div>
+          <button
+            onClick={aoSair}
+            className="text-xs text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          >
+            Sair
+          </button>
         </header>
 
         <section className="mb-6">
@@ -145,18 +334,11 @@ export default function Home() {
             <p className="text-zinc-900 dark:text-zinc-100 whitespace-pre-wrap">
               {resposta.resposta}
             </p>
-            {resposta.fontes.length > 0 && (
-              <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800">
-                <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                  Fontes:
-                </span>
-                <ul className="mt-1 text-xs text-zinc-700 dark:text-zinc-300">
-                  {resposta.fontes.map((f, i) => (
-                    <li key={i}>• {f}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Permissões aplicadas: {resposta.permissoes_aplicadas.join(", ")}
+              </p>
+            </div>
           </section>
         )}
       </div>

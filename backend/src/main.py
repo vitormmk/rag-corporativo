@@ -1,87 +1,130 @@
 """
 Backend do RAG Corporativo.
-Esqueleto inicial: endpoints /health e /query com resposta mockada.
+Auth simplificada: login retorna dados do usuário, frontend envia
+X-Username em requisições subsequentes.
 """
-import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
-from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Carrega variáveis do .env (que está na raiz do projeto, um nível acima)
-load_dotenv(dotenv_path="../.env")
+from src.auth.dependencies import AuthenticatedUser, get_current_user
+from src.auth.permissions import get_permissoes
+from src.auth.users import authenticate
+from src.config import ENVIRONMENT
 
 
-# === Modelos de dados (Pydantic) ===
+# === Modelos ===
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    username: str
+    nome: str
+    grupos: list[str]
+    permissoes: list[str]
+
 
 class QueryRequest(BaseModel):
-    """Request enviado pelo frontend ao endpoint /query."""
     pergunta: str
-    assistente_id: str = "ti"  # default temporário; depois vira obrigatório
+    assistente_id: str = "ti"
 
 
 class QueryResponse(BaseModel):
-    """Response devolvido pelo endpoint /query."""
     resposta: str
     fontes: list[str]
-    confianca: str  # "alta", "baixa", "sem_resposta"
+    confianca: str
     assistente_id: str
+    permissoes_aplicadas: list[str]
 
 
-# === Lifespan: executado no start/shutdown da aplicação ===
+# === Lifespan ===
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    env = os.getenv("ENVIRONMENT", "development")
-    print(f"[startup] backend iniciando em modo {env}")
+    print(f"[startup] backend iniciando em modo {ENVIRONMENT}")
     yield
-    # Shutdown
     print("[shutdown] backend encerrando")
 
 
-# === Aplicação ===
+# === App ===
 
 app = FastAPI(
     title="RAG Corporativo - Backend",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
-# CORS: permite o frontend (Next.js em localhost:3000) chamar essa API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 
-# === Endpoints ===
+# === Endpoints públicos ===
 
 @app.get("/health")
 async def health():
-    """Endpoint de saúde. Usado pra verificar se o backend está no ar."""
+    return {"status": "ok", "version": "0.2.0"}
+
+
+@app.post("/auth/login", response_model=LoginResponse)
+async def login(req: LoginRequest):
+    """Login simples por usuário + senha. Retorna dados e permissões."""
+    user = authenticate(req.username, req.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuário ou senha incorretos",
+        )
+
+    return LoginResponse(
+        username=user.username,
+        nome=user.nome,
+        grupos=user.grupos,
+        permissoes=get_permissoes(user.grupos),
+    )
+
+
+# === Endpoints protegidos ===
+
+@app.get("/me")
+async def me(user: AuthenticatedUser = Depends(get_current_user)):
+    """Retorna dados do usuário autenticado. Útil pra validar sessão."""
     return {
-        "status": "ok",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "version": "0.1.0",
+        "username": user.username,
+        "nome": user.nome,
+        "grupos": user.grupos,
+        "permissoes": user.permissoes,
     }
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query(req: QueryRequest):
+async def query(
+    req: QueryRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
-    Endpoint principal. Por enquanto retorna resposta mockada.
-    Nas próximas fases vai incorporar auth, retrieval e LLM.
+    Endpoint principal.
+    Por enquanto retorna mock, mas já mostra permissões resolvidas.
+    Próxima fase: incorporar retrieval e LLM.
     """
     return QueryResponse(
-        resposta=f"[mock] Você perguntou: '{req.pergunta}' ao assistente '{req.assistente_id}'.",
+        resposta=(
+            f"[mock] Olá {user.nome}. "
+            f"Você perguntou ao assistente '{req.assistente_id}': "
+            f"'{req.pergunta}'."
+        ),
         fontes=[],
         confianca="alta",
         assistente_id=req.assistente_id,
+        permissoes_aplicadas=user.permissoes,
     )
