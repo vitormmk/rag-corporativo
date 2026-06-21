@@ -1,7 +1,7 @@
 """
 Backend do RAG Corporativo.
-Auth simplificada: login retorna dados do usuário, frontend envia
-X-Username em requisições subsequentes.
+Endpoint /query agora aplica retrieval com filtro de permissão.
+Resposta do LLM ainda é mock; será substituída na próxima fase.
 """
 from contextlib import asynccontextmanager
 
@@ -13,6 +13,12 @@ from src.auth.dependencies import AuthenticatedUser, get_current_user
 from src.auth.permissions import get_permissoes
 from src.auth.users import authenticate
 from src.config import ENVIRONMENT
+from src.rag.assistentes import (
+    ASSISTENTES,
+    classificacoes_efetivas,
+    get_assistente,
+)
+from src.rag.retrieval import buscar_chunks
 
 
 # === Modelos ===
@@ -29,17 +35,31 @@ class LoginResponse(BaseModel):
     permissoes: list[str]
 
 
+class AssistenteInfo(BaseModel):
+    id: str
+    nome: str
+    descricao: str
+
+
 class QueryRequest(BaseModel):
     pergunta: str
     assistente_id: str = "ti"
 
 
+class FonteRecuperada(BaseModel):
+    id: str
+    texto: str
+    fonte: str
+    classificacao: str
+    score: float
+
+
 class QueryResponse(BaseModel):
     resposta: str
-    fontes: list[str]
+    fontes: list[FonteRecuperada]
     confianca: str
     assistente_id: str
-    permissoes_aplicadas: list[str]
+    classificacoes_consultadas: list[str]
 
 
 # === Lifespan ===
@@ -55,7 +75,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RAG Corporativo - Backend",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -73,12 +93,11 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 @app.post("/auth/login", response_model=LoginResponse)
 async def login(req: LoginRequest):
-    """Login simples por usuário + senha. Retorna dados e permissões."""
     user = authenticate(req.username, req.password)
     if not user:
         raise HTTPException(
@@ -98,7 +117,6 @@ async def login(req: LoginRequest):
 
 @app.get("/me")
 async def me(user: AuthenticatedUser = Depends(get_current_user)):
-    """Retorna dados do usuário autenticado. Útil pra validar sessão."""
     return {
         "username": user.username,
         "nome": user.nome,
@@ -107,24 +125,97 @@ async def me(user: AuthenticatedUser = Depends(get_current_user)):
     }
 
 
+@app.get("/assistentes", response_model=list[AssistenteInfo])
+async def listar_assistentes(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Retorna assistentes disponíveis para o usuário.
+    Um assistente é 'disponível' se a intersecção com as permissões
+    do usuário não for vazia (ou seja, há ao menos algo a ver).
+    """
+    disponiveis = []
+    for assistente in ASSISTENTES.values():
+        if classificacoes_efetivas(assistente.id, user.permissoes):
+            disponiveis.append(
+                AssistenteInfo(
+                    id=assistente.id,
+                    nome=assistente.nome,
+                    descricao=assistente.descricao,
+                )
+            )
+    return disponiveis
+
+
 @app.post("/query", response_model=QueryResponse)
 async def query(
     req: QueryRequest,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
-    Endpoint principal.
-    Por enquanto retorna mock, mas já mostra permissões resolvidas.
-    Próxima fase: incorporar retrieval e LLM.
+    Recebe pergunta, aplica retrieval com filtro de permissão,
+    monta resposta mockada com base nos chunks recuperados.
     """
-    return QueryResponse(
-        resposta=(
-            f"[mock] Olá {user.nome}. "
-            f"Você perguntou ao assistente '{req.assistente_id}': "
-            f"'{req.pergunta}'."
-        ),
-        fontes=[],
-        confianca="alta",
+    # Valida que o assistente existe
+    assistente = get_assistente(req.assistente_id)
+    if not assistente:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Assistente '{req.assistente_id}' não existe",
+        )
+
+    # Calcula as classificações que serão efetivamente consultadas
+    classificacoes = classificacoes_efetivas(
+        req.assistente_id, user.permissoes
+    )
+
+    # Se a intersecção for vazia, usuário não tem acesso ao assistente
+    if not classificacoes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Sem permissão para o assistente '{req.assistente_id}'",
+        )
+
+    # Busca os chunks
+    chunks = buscar_chunks(
+        pergunta=req.pergunta,
+        permissoes_usuario=user.permissoes,
         assistente_id=req.assistente_id,
-        permissoes_aplicadas=user.permissoes,
+    )
+
+    # Confiança e resposta mockada baseadas no que foi recuperado
+    if not chunks:
+        confianca = "sem_resposta"
+        resposta = (
+            "Não encontrei informação sobre isso no escopo deste assistente. "
+            "Tente reformular a pergunta ou consulte outro assistente."
+        )
+    elif chunks[0].score < 0.5:
+        confianca = "baixa"
+        resposta = (
+            f"[mock] Encontrei {len(chunks)} trecho(s) com relevância "
+            f"limitada. Pergunta original: '{req.pergunta}'."
+        )
+    else:
+        confianca = "alta"
+        resposta = (
+            f"[mock] Encontrei {len(chunks)} trecho(s) relevantes para "
+            f"sua pergunta. Pergunta original: '{req.pergunta}'."
+        )
+
+    return QueryResponse(
+        resposta=resposta,
+        fontes=[
+            FonteRecuperada(
+                id=c.id,
+                texto=c.texto,
+                fonte=c.fonte,
+                classificacao=c.classificacao,
+                score=round(c.score, 2),
+            )
+            for c in chunks
+        ],
+        confianca=confianca,
+        assistente_id=req.assistente_id,
+        classificacoes_consultadas=classificacoes,
     )

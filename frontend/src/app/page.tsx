@@ -2,8 +2,6 @@
 
 import { useEffect, useState } from "react";
 
-type Assistente = "ti" | "rh" | "processos";
-
 type Usuario = {
   username: string;
   nome: string;
@@ -11,19 +9,27 @@ type Usuario = {
   permissoes: string[];
 };
 
-type RespostaAPI = {
-  resposta: string;
-  fontes: string[];
-  confianca: "alta" | "baixa" | "sem_resposta";
-  assistente_id: string;
-  permissoes_aplicadas: string[];
+type AssistenteInfo = {
+  id: string;
+  nome: string;
+  descricao: string;
 };
 
-const ASSISTENTES: { id: Assistente; nome: string; descricao: string }[] = [
-  { id: "ti", nome: "TI", descricao: "Infraestrutura, redes, sistemas" },
-  { id: "rh", nome: "RH", descricao: "Políticas, benefícios, processos" },
-  { id: "processos", nome: "Processos", descricao: "Procedimentos gerais" },
-];
+type Fonte = {
+  id: string;
+  texto: string;
+  fonte: string;
+  classificacao: string;
+  score: number;
+};
+
+type RespostaAPI = {
+  resposta: string;
+  fontes: Fonte[];
+  confianca: "alta" | "baixa" | "sem_resposta";
+  assistente_id: string;
+  classificacoes_consultadas: string[];
+};
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const STORAGE_KEY = "rag.usuario";
@@ -32,7 +38,6 @@ export default function Home() {
   const [usuario, setUsuario] = useState<Usuario | null>(null);
   const [carregando, setCarregando] = useState(true);
 
-  // Restaura sessão do localStorage no carregamento
   useEffect(() => {
     const salvo = localStorage.getItem(STORAGE_KEY);
     if (salvo) {
@@ -190,14 +195,40 @@ function TelaChat({
   usuario: Usuario;
   aoSair: () => void;
 }) {
-  const [assistente, setAssistente] = useState<Assistente>("ti");
+  const [assistentes, setAssistentes] = useState<AssistenteInfo[]>([]);
+  const [assistente, setAssistente] = useState<string>("");
   const [pergunta, setPergunta] = useState("");
   const [resposta, setResposta] = useState<RespostaAPI | null>(null);
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
 
+  // Busca os assistentes disponíveis para este usuário
+  useEffect(() => {
+    async function carregarAssistentes() {
+      try {
+        const res = await fetch(`${API_URL}/assistentes`, {
+          headers: { "X-Username": usuario.username },
+        });
+
+        if (res.status === 401) {
+          aoSair();
+          return;
+        }
+
+        if (!res.ok) throw new Error(`Erro ${res.status}`);
+
+        const data: AssistenteInfo[] = await res.json();
+        setAssistentes(data);
+        if (data.length > 0) setAssistente(data[0].id);
+      } catch (e) {
+        setErro(e instanceof Error ? e.message : "Erro ao carregar assistentes");
+      }
+    }
+    carregarAssistentes();
+  }, [usuario.username, aoSair]);
+
   async function enviar() {
-    if (!pergunta.trim()) return;
+    if (!pergunta.trim() || !assistente) return;
 
     setLoading(true);
     setErro(null);
@@ -222,7 +253,8 @@ function TelaChat({
       }
 
       if (!res.ok) {
-        throw new Error(`Erro ${res.status}: ${res.statusText}`);
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `Erro ${res.status}`);
       }
 
       const data: RespostaAPI = await res.json();
@@ -239,6 +271,16 @@ function TelaChat({
       e.preventDefault();
       enviar();
     }
+  }
+
+  function corClassificacao(c: string): string {
+    if (c.includes("confidencial") || c === "ti-interno") {
+      return "bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200";
+    }
+    if (c.includes("publico") && c !== "publico") {
+      return "bg-blue-100 text-blue-900 dark:bg-blue-950 dark:text-blue-200";
+    }
+    return "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
   }
 
   return (
@@ -269,7 +311,7 @@ function TelaChat({
             Assistente
           </label>
           <div className="grid grid-cols-3 gap-2">
-            {ASSISTENTES.map((a) => (
+            {assistentes.map((a) => (
               <button
                 key={a.id}
                 onClick={() => setAssistente(a.id)}
@@ -300,7 +342,7 @@ function TelaChat({
           />
           <button
             onClick={enviar}
-            disabled={loading || !pergunta.trim()}
+            disabled={loading || !pergunta.trim() || !assistente}
             className="mt-3 px-4 py-2 rounded bg-zinc-900 text-zinc-50 text-sm font-medium hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
           >
             {loading ? "Buscando..." : "Enviar"}
@@ -314,31 +356,69 @@ function TelaChat({
         )}
 
         {resposta && (
-          <section className="p-4 rounded border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                Resposta — {resposta.assistente_id}
-              </span>
-              <span
-                className={`text-xs px-2 py-1 rounded ${
-                  resposta.confianca === "alta"
-                    ? "bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-200"
-                    : resposta.confianca === "baixa"
-                    ? "bg-yellow-100 text-yellow-900 dark:bg-yellow-950 dark:text-yellow-200"
-                    : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                }`}
-              >
-                confiança: {resposta.confianca}
-              </span>
-            </div>
-            <p className="text-zinc-900 dark:text-zinc-100 whitespace-pre-wrap">
-              {resposta.resposta}
-            </p>
-            <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                Permissões aplicadas: {resposta.permissoes_aplicadas.join(", ")}
+          <section className="space-y-4">
+            <div className="p-4 rounded border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  Resposta — {resposta.assistente_id}
+                </span>
+                <span
+                  className={`text-xs px-2 py-1 rounded ${
+                    resposta.confianca === "alta"
+                      ? "bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-200"
+                      : resposta.confianca === "baixa"
+                      ? "bg-yellow-100 text-yellow-900 dark:bg-yellow-950 dark:text-yellow-200"
+                      : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                  }`}
+                >
+                  confiança: {resposta.confianca}
+                </span>
+              </div>
+              <p className="text-zinc-900 dark:text-zinc-100 whitespace-pre-wrap">
+                {resposta.resposta}
               </p>
+              <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800 text-xs text-zinc-500 dark:text-zinc-400">
+                Classificações consultadas:{" "}
+                {resposta.classificacoes_consultadas.join(", ") || "nenhuma"}
+              </div>
             </div>
+
+            {resposta.fontes.length > 0 && (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-2">
+                  Trechos recuperados ({resposta.fontes.length})
+                </p>
+                <div className="space-y-2">
+                  {resposta.fontes.map((f) => (
+                    <div
+                      key={f.id}
+                      className="p-3 rounded border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {f.fonte} · {f.id}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded ${corClassificacao(
+                              f.classificacao
+                            )}`}
+                          >
+                            {f.classificacao}
+                          </span>
+                          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                            score: {f.score.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-sm text-zinc-800 dark:text-zinc-200">
+                        {f.texto}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         )}
       </div>
